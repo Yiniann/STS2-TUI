@@ -103,8 +103,16 @@ fi
 if [ -z "$DOTNET" ]; then
     echo ""
     echo "❌ .NET SDK not found."
-    echo "   Install .NET 9+ from https://dotnet.microsoft.com/download"
+    echo "   Install .NET 9 from https://dotnet.microsoft.com/download/dotnet/9.0"
     echo "   Or set DOTNET env var to your dotnet binary path."
+    exit 1
+fi
+
+if ! "$DOTNET" --list-runtimes | grep -q '^Microsoft.NETCore.App 9\.'; then
+    echo ""
+    echo "❌ .NET 9 runtime not found."
+    echo "   This project uses Harmony patches that are not compatible with .NET 10."
+    echo "   Install .NET 9 from https://dotnet.microsoft.com/download/dotnet/9.0"
     exit 1
 fi
 

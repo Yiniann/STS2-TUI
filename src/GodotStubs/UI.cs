@@ -5,6 +5,7 @@ public class CanvasItem : Node
 {
     public Color Modulate { get; set; } = Color.White;
     public Color SelfModulate { get; set; } = Color.White;
+    public void SetSelfModulate(Color color) => SelfModulate = color;
     public bool Visible { get; set; } = true;
     public virtual void Show() => Visible = true;
     public virtual void Hide() => Visible = false;
@@ -308,6 +309,9 @@ public class AudioStreamPlayer : Node
     }
     public AudioStream? Stream { get; set; }
     public float VolumeDb { get; set; }
+    public float VolumeLinear { get; set; }
+    public float PitchScale { get; set; } = 1f;
+    public StringName Bus { get; set; } = "Master";
     public void Play(float fromPosition = 0) { }
     public void Stop() { }
 }

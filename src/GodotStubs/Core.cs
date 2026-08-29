@@ -8,6 +8,9 @@ public class GodotObject
 
     public static bool IsInstanceValid(GodotObject? obj) => obj != null;
     public virtual bool IsQueuedForDeletion() => false;
+    public Error Connect(StringName signal, Callable callable, uint flags = 0) => Error.Ok;
+    public void Disconnect(StringName signal, Callable callable) { }
+    public void EmitSignal(StringName signal, params Variant[] args) { }
 
     // ToSignal - must be on GodotObject (not Node) to match real Godot
     public SignalAwaiter ToSignal(GodotObject source, StringName signal)
@@ -91,7 +94,6 @@ public class Node : GodotObject
     public int GetChildCount(bool includeInternal = false) => _children.Count;
 
     public void CallDeferred(StringName method, params Variant[] args) { }
-
     public virtual void _Ready() { }
     public virtual void _EnterTree() { }
     public virtual void _ExitTree() { }

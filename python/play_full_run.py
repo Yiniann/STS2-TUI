@@ -20,6 +20,8 @@ import subprocess
 import sys
 import random
 import os
+import threading
+from collections import deque
 from game_log import GameLogger
 
 VALID_CHARACTERS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
@@ -50,13 +52,25 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
         text=True,
         bufsize=1,
     )
+    stderr_tail = deque(maxlen=200)
+    if proc.stderr is not None:
+        def drain_stderr():
+            for line in proc.stderr:
+                stderr_tail.append(line.rstrip())
+
+        threading.Thread(
+            target=drain_stderr,
+            name="sts2-full-run-stderr-drain",
+            daemon=True,
+        ).start()
 
     def read_json_line() -> dict:
         """Read a line from stdout, skipping non-JSON lines (build warnings etc.)"""
         while True:
             resp_line = proc.stdout.readline().strip()
             if not resp_line:
-                raise RuntimeError("No response from simulator (EOF)")
+                detail = f": {stderr_tail[-1]}" if stderr_tail else ""
+                raise RuntimeError(f"No response from simulator (EOF){detail}")
             if resp_line.startswith("{"):
                 return json.loads(resp_line)
             # Skip non-JSON lines (build warnings, etc.)

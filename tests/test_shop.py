@@ -96,3 +96,6 @@ class TestShopRemove:
             # Should return to shop with deck_size - 1
             if state.get("decision") == "shop":
                 assert state["player"]["deck_size"] == deck_before - 1
+                assert state.get("card_removal_cost") is None
+                repeated = game.act("remove_card")
+                assert repeated.get("type") == "error"

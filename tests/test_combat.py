@@ -9,7 +9,8 @@ class TestCombatStructure:
         state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
         assert state["decision"] == "combat_play"
         for key in ("round", "energy", "max_energy", "hand", "enemies",
-                    "player", "draw_pile_count", "discard_pile_count", "player_powers"):
+                    "player", "draw_pile_count", "discard_pile_count",
+                    "exhaust_pile_count", "player_powers"):
             assert key in state, f"Missing: {key}"
 
     def test_card_fields(self, game):
@@ -34,6 +35,30 @@ class TestCombatStructure:
 
 
 class TestPlayCards:
+    def test_armaments_selection_is_labeled_as_upgrade(self, game):
+        game.start(seed="armaments-selection-kind")
+        game.set_player(deck=["ARMAMENTS", "BASH", "STRIKE_IRONCLAD", "DEFEND_IRONCLAD"])
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+        armaments = next(card for card in state["hand"] if card["id"] == "CARD.ARMAMENTS")
+
+        state = game.act("play_card", card_index=armaments["index"])
+
+        assert state["decision"] == "card_select"
+        assert state["selection_kind"] == "upgrade"
+        assert state["min_select"] == 1
+        assert state["max_select"] == 1
+
+    def test_discard_selection_is_labeled(self, game):
+        game.start(character="Silent", seed="discard-selection-kind")
+        game.set_player(deck=["SURVIVOR", "STRIKE_SILENT", "DEFEND_SILENT"])
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+        survivor = next(card for card in state["hand"] if card["id"] == "CARD.SURVIVOR")
+
+        state = game.act("play_card", card_index=survivor["index"])
+
+        assert state["decision"] == "card_select"
+        assert state["selection_kind"] == "discard"
+
     def test_play_card_costs_energy(self, game):
         state = game.start(seed="cp1")
         game.skip_neow(state)
@@ -118,6 +143,74 @@ class TestCombatEnd:
         state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
         state = game.auto_play_combat(state)
         assert state["decision"] in ("card_reward", "map_select", "card_select", "bundle_select")
+
+    def test_test_subject_revives_twice_before_combat_ends(self, game):
+        game.start(seed="test-subject-revival")
+        game.set_player(hp=9999, max_hp=9999, deck=["BLUDGEON"] * 10)
+        state = game.enter_room("combat", encounter="TEST_SUBJECT_BOSS")
+
+        forms = []
+        revivals = 0
+        for _ in range(100):
+            if state.get("decision") != "combat_play":
+                break
+
+            enemies = state.get("enemies") or []
+            if not enemies:
+                revivals += 1
+                state = game.act("end_turn")
+                assert state["decision"] == "combat_play"
+                assert state["enemies"], "Test Subject did not respawn"
+                continue
+
+            max_hp = enemies[0]["max_hp"]
+            if not forms or forms[-1] != max_hp:
+                forms.append(max_hp)
+
+            bludgeons = [card for card in state["hand"]
+                         if card["id"] == "CARD.BLUDGEON" and card["can_play"]]
+            if bludgeons:
+                state = game.act("play_card", card_index=bludgeons[0]["index"],
+                                 target_index=0)
+            else:
+                state = game.act("end_turn")
+
+        assert forms == [100, 200, 300]
+        assert revivals == 2
+        assert state["decision"] in ("card_reward", "map_select", "card_select", "bundle_select")
+
+    def test_thieving_hopper_returns_stolen_card_on_death(self, game):
+        game.start(seed="thieving-hopper-card-return")
+        game.set_player(hp=9999, max_hp=9999, deck=["BLUDGEON"] * 10)
+        state = game.enter_room("combat", encounter="THIEVING_HOPPER_WEAK")
+        assert state["player"]["deck_size"] == 10
+
+        stolen_name = None
+        deck_size_while_stolen = None
+        for _ in range(60):
+            if state.get("decision") != "combat_play":
+                break
+
+            enemies = state.get("enemies") or []
+            for enemy in enemies:
+                for power in enemy.get("powers") or []:
+                    stolen = power.get("stolen_card")
+                    if stolen:
+                        stolen_name = stolen["name"]
+                        deck_size_while_stolen = state["player"]["deck_size"]
+
+            bludgeons = [card for card in state["hand"]
+                         if card["id"] == "CARD.BLUDGEON" and card["can_play"]]
+            if bludgeons and enemies:
+                state = game.act("play_card", card_index=bludgeons[0]["index"],
+                                 target_index=0)
+            else:
+                state = game.act("end_turn")
+
+        assert stolen_name == "Bludgeon"
+        assert deck_size_while_stolen == 9
+        assert state["decision"] in ("card_reward", "map_select", "card_select", "bundle_select")
+        assert state["player"]["deck_size"] == 10
 
     def test_player_powers_after_enemy_debuff(self, game):
         """Shrinker Beetle applies Shrink debuff to player after its turn."""

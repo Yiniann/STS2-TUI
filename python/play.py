@@ -15,12 +15,15 @@ import sys
 import os
 import argparse
 import random
+import threading
+from collections import deque
 from game_log import GameLogger
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECT = os.path.join(ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 LIB_DIR = os.path.join(ROOT, "lib")
 SAVE_DIR = os.path.join(ROOT, "saves")
+ACTIVE_SAVE_PATH = os.path.join(SAVE_DIR, "current_run.save")
 
 
 def _find_dotnet():
@@ -314,6 +317,15 @@ def show_native_save(save_path):
 def n(obj):
     """Extract display name."""
     return str(obj) if obj is not None else "?"
+
+def card_energy_cost(card, field="cost"):
+    flag = "cost_is_x" if field == "cost" else f"{field}_is_x"
+    return "X" if card.get(flag) else card.get(field, "?")
+
+def card_can_pay_energy(card, energy):
+    return bool(card.get("can_play")) and (
+        card.get("cost_is_x") or card.get("cost", 99) <= energy
+    )
 
 def short_n(obj):
     """Short name only."""
@@ -642,7 +654,7 @@ def show_player(p, show_deck=False):
                 suf_part = format_card_suffix_keywords(suf)
                 rare = cd.get("rarity")
                 rare_part = f" {c(t(rare, RARITY_ZH.get(rare, rare)), 'dim')}" if rare else ""
-                print(f"    {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(t(cd.get('type',''), ctype_zh), 'dim')}{rare_part}{suf_part}")
+                print(f"    {n(cd['name'])}{up} ({card_energy_cost(cd)}) {c(t(cd.get('type',''), ctype_zh), 'dim')}{rare_part}{suf_part}")
                 print_card_detail_extension(cd, indent="      ")
 
 def show_combat(state):
@@ -764,7 +776,7 @@ def show_combat(state):
     print()
     hand = state.get("hand", [])
     for card in hand:
-        cost = card.get("cost", 0)
+        cost = card_energy_cost(card)
         playable = card.get("can_play", False)
         ctype = card.get("type", "?")
         target = card.get("target_type", "")
@@ -830,7 +842,7 @@ def _format_upgrade_preview(stats, aug, current_cost=None):
     aug_stats = aug.get("stats") or {}
     parts = []
     # Cost change
-    aug_cost = aug.get("cost")
+    aug_cost = card_energy_cost(aug)
     if current_cost is not None and aug_cost is not None and aug_cost != current_cost:
         parts.append(c(f"{t('cost','费用')} {current_cost}→{aug_cost}", "green"))
     # Compare all stats, show changed values with readable names
@@ -859,7 +871,7 @@ def print_card_detail_extension(card, indent="      "):
         if line:
             print(f"{indent}{c(line, 'dim')}")
     stats = card.get("stats") or {}
-    aug_parts = _format_upgrade_preview(stats, card.get("after_upgrade"), card.get("cost"))
+    aug_parts = _format_upgrade_preview(stats, card.get("after_upgrade"), card_energy_cost(card))
     if aug_parts:
         print(f"{indent}{c(t('upgrade:','升级:'), 'green')} {', '.join(aug_parts)}")
 
@@ -887,20 +899,22 @@ def show_card_reward(state):
     for card in cards:
         ctype = card.get("type", "?")
         rarity = card.get("rarity", "Common")
-        cost = card.get("cost", "?")
+        cost = card_energy_cost(card)
         type_color = {"Attack": "red", "Skill": "blue", "Power": "magenta"}.get(ctype, "reset")
         rarity_zh = RARITY_ZH.get(rarity, rarity)
         rarity_label = t(rarity, rarity_zh)
         rarity_color = {"Rare": "yellow", "Uncommon": "cyan"}.get(rarity, "dim")
+        upgraded = "+" if card.get("upgraded") else ""
         _pre, suf = split_card_keywords(card.get("keywords"))
         suf_part = format_card_suffix_keywords(suf)
-        print(f"  [{card['index']}] {c(n(card['name']), type_color)} ({cost}) {c(rarity_label, rarity_color)}{suf_part}")
+        print(f"  [{card['index']}] {c(n(card['name']) + upgraded, type_color)} ({cost}) {c(rarity_label, rarity_color)}{suf_part}")
         print_card_detail_extension(card, indent="      ")
 
     print()
     if cards:
         hi = len(cards) - 1
-        print(f"  {c(t(f'Pick one card: type index 0–{hi}, or s to skip.', f'请选择一张：输入编号 0–{hi}，或 s 跳过。'), 'yellow')}")
+        reroll_hint = t(", or f to reroll", "，或 f 重掷") if state.get("can_reroll") else ""
+        print(f"  {c(t(f'Pick one card: type index 0–{hi}, or s to skip', f'请选择一张：输入编号 0–{hi}，或 s 跳过') + reroll_hint + '。', 'yellow')}")
     else:
         print(f"  {c(t('No cards to pick.', '没有可选卡牌。'), 'dim')}")
 
@@ -917,7 +931,7 @@ def show_shop(state):
         affordable = c(str(cost), "green") if cost <= gold else c(str(cost), "red")
         sale = c(t(" SALE"," 打折"), "yellow") if card.get("on_sale") else ""
         ctype_zh = CARD_TYPE_ZH.get(card.get("type",""), card.get("type",""))
-        cc = card.get("card_cost", "?")
+        cc = card_energy_cost(card, "card_cost")
         _pre, suf = split_card_keywords(card.get("keywords"))
         suf_part = format_card_suffix_keywords(suf)
         print(f"  [{card['index']}] {n(card['name'])} ({cc}) {c(t(card.get('type','?'), ctype_zh), 'dim')}{suf_part} — {affordable}{t('g','金')}{sale}")
@@ -1043,15 +1057,22 @@ def show_event(state):
             title = n(raw_title)
         else:
             title = loc_resolve(raw_title) if '.' in str(raw_title) or str(raw_title).isupper() else raw_title
+        title = resolve_template(desc(title), opt.get("title_vars") or opt.get("vars") or {})
         # Show option description with resolved template vars
         raw_desc = opt.get("description")
         opt_desc = desc(raw_desc) if raw_desc else ""
         # Resolve template vars like [MaxHp], [Gold], {Cards}
-        opt_vars = opt.get("vars") or {}
+        opt_vars = opt.get("description_vars") or opt.get("vars") or {}
         if opt_vars and opt_desc:
             opt_desc = resolve_template(opt_desc, opt_vars)
         desc_str = f" — {c(opt_desc, 'dim')}" if opt_desc else ""
         print(f"  {mark} [{opt['index']}] {title}{desc_str}")
+        effect = opt.get("effect") or {}
+        effect_desc = desc(effect.get("description")) if effect else ""
+        if effect_desc:
+            effect_desc = resolve_template(effect_desc, effect.get("vars") or {})
+            effect_label = t("Enchant:", "附魔:") if effect.get("kind") == "enchantment" else t("Effect:", "效果:")
+            print(f"      {c(effect_label, 'cyan')} {n(effect.get('name'))} — {effect_desc}")
 
 # ─── Input handling ───
 
@@ -1265,8 +1286,9 @@ def get_input(prompt, valid_options=None, state=None, multi_select=False, multi_
     {c('deck', 'cyan')}     — 查看牌组
     {c('potions', 'cyan')}  — 查看药水
     {c('relics', 'cyan')}   — 查看遗物
-    {c('quit', 'cyan')}     — 退出
-    {c('save', 'cyan')}     — 存档
+    {c('quit', 'cyan')}     — 保存并退出
+    {c('abandon', 'cyan')}  — 放弃本局并删除活动存档
+    {c('save', 'cyan')}     — 立即保存
     {c('saves', 'cyan')}    — 查看存档列表
 
   {c('操作:', 'bold')}
@@ -1286,9 +1308,9 @@ def get_input(prompt, valid_options=None, state=None, multi_select=False, multi_
     {c('deck', 'cyan')}     — show deck
     {c('potions', 'cyan')}  — show potions
     {c('relics', 'cyan')}   — show relics
-    {c('quit', 'cyan')}     — quit
-    {c('abandon', 'cyan')}  — abandon run (forfeit)
-    {c('save', 'cyan')}     — save game
+    {c('quit', 'cyan')}     — save and quit
+    {c('abandon', 'cyan')}  — abandon run and delete the active save
+    {c('save', 'cyan')}     — save now
     {c('saves', 'cyan')}    — list saves
 
   {c('Actions:', 'bold')}
@@ -1352,7 +1374,7 @@ def get_input(prompt, valid_options=None, state=None, multi_select=False, multi_
         if raw == "abandon":
             confirm = input(f"  {t('Abandon this run? (y/n): ','放弃本次运行？(y/n): ')}")
             if confirm.strip().lower() in ("y", "yes", "是"):
-                raise KeyboardInterrupt("abandon")
+                raise _AbandonRequested()
             continue
 
         if valid_options:
@@ -1403,64 +1425,176 @@ def _load_game(save_path):
         sys.exit(1)
     return data["character"], data["seed"], data["actions"]
 
+def _save_modified_label(path):
+    from datetime import datetime
+    return datetime.fromtimestamp(os.path.getmtime(path)).strftime("%m-%d %H:%M")
+
+
+def _native_save_summary(path, source="local"):
+    with open(path) as fh:
+        data = json.load(fh)
+    players = data.get("players") or []
+    player = players[0] if players else {}
+    run_time = int(data.get("run_time") or 0)
+    return {
+        "file": os.path.basename(path),
+        "path": os.path.abspath(path),
+        "type": "native",
+        "source": source,
+        "character": _id_to_name(player.get("character_id", "?")),
+        "seed": (data.get("rng") or {}).get("seed", "?"),
+        "ascension": data.get("ascension", 0),
+        "act": int(data.get("current_act_index") or 0) + 1,
+        "floor": len(data.get("visited_map_coords") or []),
+        "hp": player.get("current_hp", 0),
+        "max_hp": player.get("max_hp", 0),
+        "gold": player.get("gold", 0),
+        "run_time": run_time,
+        "modified": _save_modified_label(path),
+        "mtime": os.path.getmtime(path),
+    }
+
+
+def _replay_save_summary(path):
+    with open(path) as fh:
+        data = json.load(fh)
+    if "actions" not in data:
+        return None
+    return {
+        "file": os.path.basename(path),
+        "path": os.path.abspath(path),
+        "type": "replay",
+        "source": "local",
+        "character": data.get("character", "?"),
+        "seed": data.get("seed", "?"),
+        "actions": len(data.get("actions") or []),
+        "modified": _save_modified_label(path),
+        "mtime": os.path.getmtime(path),
+    }
+
+
 def _list_saves():
-    """List available save files (replay .json and native .save files)."""
-    if not os.path.isdir(SAVE_DIR):
-        return []
+    """List local replay/native saves and the game's current native save."""
     saves = []
-    for f in sorted(os.listdir(SAVE_DIR)):
-        path = os.path.join(SAVE_DIR, f)
-        if f.endswith(".json"):
-            # Only list .json files that are replay saves (have "actions" key)
+    seen_paths = set()
+
+    if os.path.isdir(SAVE_DIR):
+        for filename in os.listdir(SAVE_DIR):
+            path = os.path.abspath(os.path.join(SAVE_DIR, filename))
             try:
-                with open(path) as fh:
-                    d = json.load(fh)
-                if "actions" not in d:
-                    continue  # skip non-replay JSON files
-                saves.append({
-                    "file": f, "path": path, "type": "replay",
-                    "character": d.get("character", "?"),
-                    "seed": d.get("seed", "?"),
-                    "actions": len(d.get("actions", [])),
-                })
-            except Exception:
+                summary = None
+                if filename.endswith(".json"):
+                    summary = _replay_save_summary(path)
+                elif filename.endswith(".save"):
+                    summary = _native_save_summary(path)
+                if summary:
+                    saves.append(summary)
+                    seen_paths.add(os.path.realpath(path))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+
+    native_dir = _find_native_save_dir()
+    if native_dir:
+        current_run = os.path.abspath(os.path.join(native_dir, "current_run.save"))
+        if os.path.isfile(current_run) and os.path.realpath(current_run) not in seen_paths:
+            try:
+                saves.append(_native_save_summary(current_run, source="game"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 pass
-        elif f.endswith(".save"):
-            # Native save files
-            saves.append({
-                "file": f, "path": path, "type": "native",
-                "character": "?", "seed": "?", "actions": "—",
-            })
-    return saves
+
+    return sorted(saves, key=lambda save: save.get("mtime", 0), reverse=True)
 
 class _QuitRequested(Exception):
     pass
 
-def _quit_with_save(native_save_path, character, seed):
-    """Return the save path to use on quit, or None to quit without saving."""
-    print()
+
+class _AbandonRequested(Exception):
+    pass
+
+
+def _delete_active_save():
+    """Delete only this client's single active-run save."""
     try:
-        ans = input(f"  {t('Save before quitting? (y/n): ','退出前是否存档？(y/n): ')}").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        ans = "n"
+        os.remove(ACTIVE_SAVE_PATH)
+        return True
+    except FileNotFoundError:
+        return False
 
-    if ans not in ("y", "yes", "是"):
-        print(f"  {t('Quitting without saving.','退出，未保存。')}")
+
+def _active_save_summary():
+    if not os.path.isfile(ACTIVE_SAVE_PATH):
         return None
+    try:
+        return _native_save_summary(ACTIVE_SAVE_PATH, source="active")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {
+            "file": os.path.basename(ACTIVE_SAVE_PATH),
+            "path": ACTIVE_SAVE_PATH,
+            "type": "native",
+            "source": "active",
+            "character": "?",
+            "seed": "?",
+            "corrupt": True,
+        }
 
-    if native_save_path:
-        return native_save_path
 
-    from datetime import datetime
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    char_tag = (character or "run").lower()
-    seed_tag = seed or "random"
-    return os.path.join(SAVE_DIR, f"{char_tag}_{seed_tag}_{ts}.save")
+def _should_autosave(command, response):
+    if not response or response.get("type") == "error":
+        return False
+    command_type = command.get("cmd")
+    if command_type in ("start_run", "load_save"):
+        return True
+    if command_type != "action":
+        return False
+    return (
+        command.get("action") == "select_map_node"
+        or response.get("decision") == "map_select"
+    )
+
+
+def _restore_terminal_for_prompt():
+    """Restore canonical, echoed input before leaving curses for ``input()``."""
+    try:
+        import curses
+    except ImportError:
+        pass
+    else:
+        try:
+            curses.endwin()
+        except curses.error:
+            pass
+
+    try:
+        import termios
+
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+        attrs = termios.tcgetattr(fd)
+        attrs[0] |= termios.ICRNL
+        attrs[1] |= termios.OPOST
+        attrs[3] |= termios.ECHO | termios.ICANON | termios.ISIG
+        if hasattr(termios, "IEXTEN"):
+            attrs[3] |= termios.IEXTEN
+        attrs[6][termios.VMIN] = 1
+        attrs[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+    except (ImportError, OSError, ValueError):
+        # Non-POSIX platforms and redirected stdin do not need this repair.
+        pass
+
+
+def _quit_with_save(native_save_path=None, character=None, seed=None, run_finished=False):
+    """Return the active save path unless the run has already ended."""
+    _restore_terminal_for_prompt()
+    return None if run_finished else ACTIVE_SAVE_PATH
 
 
 def _show_quit_save_result(result):
     """Print save confirmation or failure from a quit_result response."""
     save_result = result.get("save") if result else None
+    if result and result.get("type") == "save_result":
+        save_result = result
     if save_result and save_result.get("success"):
         sz = save_result.get("size", 0)
         save_path = save_result.get("path")
@@ -1484,12 +1618,14 @@ def _writeback_continue_save(send_fn, native_save_path):
         print(f"  {c(t('Save failed:','存档写入失败:'), 'red')} {result.get('message','?')}")
 
 
-def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
-         load_path=None, native_save_path=None):
+def play(character="Ironclad", seed=None, auto=False, ascension=0, log=False,
+         load_path=None, native_save_path=None, use_tui=False):
     actual_seed = seed or f"cli_{random.randint(1000,9999)}"
     replay_actions = None
     restart_requested = False
     quit_sent = False
+    abandoning = False
+    run_finished = False
 
     if load_path:
         character, actual_seed, replay_actions = _load_game(load_path)
@@ -1503,18 +1639,35 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, bufsize=1,
     )
+    stderr_tail = deque(maxlen=200)
+
+    def drain_stderr():
+        """Prevent the simulator from blocking when its stderr pipe fills."""
+        if proc.stderr is None:
+            return
+        for line in proc.stderr:
+            stderr_tail.append(line.rstrip())
+
+    stderr_thread = threading.Thread(
+        target=drain_stderr,
+        name="sts2-stderr-drain",
+        daemon=True,
+    )
+    stderr_thread.start()
 
     def read():
         while True:
             l = proc.stdout.readline().strip()
             if not l:
+                if stderr_tail:
+                    print(f"  {c(t('Simulator stopped:','后端已停止:'), 'red')} {stderr_tail[-1]}")
                 return None
             if l.startswith("{"):
                 resp = json.loads(l)
                 logger.log_state(resp)
                 return resp
 
-    def send(cmd, record=True):
+    def send_raw(cmd, record=True):
         logger.log_action(cmd)
         if record and cmd.get("cmd") == "action":
             action_log.append(cmd)
@@ -1522,17 +1675,37 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
         proc.stdin.flush()
         return read()
 
+    def send(cmd, record=True):
+        nonlocal run_finished
+        response = send_raw(cmd, record=record)
+        if response and response.get("decision") == "game_over":
+            run_finished = True
+            _delete_active_save()
+            return response
+        if _should_autosave(cmd, response):
+            save_result = send_raw(
+                {"cmd": "write_continue_save", "path": ACTIVE_SAVE_PATH},
+                record=False,
+            )
+            if not save_result or not save_result.get("success"):
+                detail = (save_result or {}).get("message") or (
+                    ((save_result or {}).get("save") or {}).get("message")
+                ) or "unknown error"
+                response["autosave_error"] = t(
+                    f"Autosave failed: {detail}",
+                    f"自动保存失败：{detail}",
+                )
+        return response
+
     # Wire send into get_input for map command
     get_input._send = send
 
     def do_save():
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"{character}_{actual_seed}_{ts}.json"
-        save_path = os.path.join(SAVE_DIR, fname)
-        _save_game(save_path, character, actual_seed, action_log)
-        print(f"  {c(t('Saved!','已存档!'), 'green')} {fname} ({len(action_log)} {t('actions','步操作')})")
-        print(f"  {t('Load with:','读档命令:')} python3 play.py --load {os.path.relpath(save_path, ROOT)}")
+        result = send_raw(
+            {"cmd": "write_continue_save", "path": ACTIVE_SAVE_PATH},
+            record=False,
+        )
+        _show_quit_save_result(result)
 
     get_input._save_fn = do_save
     try:
@@ -1581,6 +1754,30 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                         return
                 print(f"\r  {c(t('Replay complete!','回放完成!'), 'green')}" + " " * 30)
                 print()
+        if use_tui:
+            try:
+                from tui import run_tui
+            except ImportError:
+                print(t("Full-screen TUI is unavailable; falling back to CLI.",
+                        "全屏 TUI 不可用，已回退到 CLI。"))
+            else:
+                try:
+                    tui_result = run_tui(
+                        state,
+                        send,
+                        get_map=lambda: send({"cmd": "get_map"}, record=False),
+                        lang=LANG,
+                        translate=t,
+                    )
+                except KeyboardInterrupt:
+                    # Ctrl+C inside curses follows the same save-aware quit flow as Q.
+                    raise _QuitRequested()
+                if tui_result == "quit":
+                    raise _QuitRequested()
+                if tui_result == "abandon":
+                    raise _AbandonRequested()
+                return tui_result == "restart"
+
         print(f"\n{c(t('Slay the Spire 2 — Headless CLI', '杀戮尖塔 2 — 终端版'), 'bold')}")
         if native_save_path:
             p = state.get("player", {}) if state else {}
@@ -1649,7 +1846,6 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                 break
 
             elif dec == "map_select":
-                _writeback_continue_save(send, native_save_path)
                 show_map(state, send_fn=send)
                 choices = state.get("choices", [])
 
@@ -1679,7 +1875,7 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
 
                 valid = {"e": "end_turn"}
                 for card in hand:
-                    if card.get("can_play") and card.get("cost", 99) <= energy:
+                    if card_can_pay_energy(card, energy):
                         valid[str(card["index"])] = card
                 # Add potion shortcuts
                 for pot in state.get("player", {}).get("potions", []):
@@ -1688,7 +1884,7 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
 
                 if auto:
                     # Auto: play first playable card, or end turn
-                    playable = [c for c in hand if c.get("can_play") and c.get("cost", 99) <= energy]
+                    playable = [c for c in hand if card_can_pay_energy(c, energy)]
                     if playable:
                         card = playable[0]
                         choice = str(card["index"])
@@ -1759,18 +1955,22 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                 cards = state.get("cards", [])
                 valid = {str(c["index"]): c for c in cards}
                 valid["s"] = None  # skip
+                if state.get("can_reroll"):
+                    valid["f"] = None
 
                 if auto:
                     choice = "0" if cards else "s"
                 else:
                     choice = get_input(
-                        t("Reward: card index 0–n or (s)kip — see list above", "卡牌奖励：输入编号（见上方）或 (s)跳过"),
+                        t("Reward: card index, (f) reroll, or (s)kip — see list above", "卡牌奖励：输入编号（见上方）、(f)重掷或 (s)跳过"),
                         set(valid.keys()),
                         state=state,
                     )
 
                 if choice == "s":
                     state = send({"cmd": "action", "action": "skip_card_reward"})
+                elif choice == "f":
+                    state = send({"cmd": "action", "action": "reroll_card_reward"})
                 else:
                     state = send({"cmd": "action", "action": "select_card_reward",
                                  "args": {"card_index": int(choice)}})
@@ -1790,7 +1990,7 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                     for cd in b.get("cards", []):
                         _p, sf = split_card_keywords(cd.get("keywords"))
                         sp = format_card_suffix_keywords(sf)
-                        print(f"    {n(cd['name'])} ({cd.get('cost','?')}) {c(cd.get('type',''), 'dim')}{sp}")
+                        print(f"    {n(cd['name'])} ({card_energy_cost(cd)}) {c(cd.get('type',''), 'dim')}{sp}")
                         print_card_detail_extension(cd, indent="      ")
                 valid = {str(b["index"]): b for b in bundles}
                 if auto:
@@ -1809,6 +2009,11 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                 max_sel = state.get("max_select", 1)
                 print(f"  {c(t('Choose cards','选择卡牌'), 'bold')} — {card_pick_quantity_hint(min_sel, max_sel)}")
                 show_player(state.get("player", {}))
+                selection_info = state.get("selection_info") or {}
+                selection_desc = desc(selection_info.get("description")) if selection_info else ""
+                if selection_desc:
+                    selection_desc = resolve_template(selection_desc, selection_info.get("vars") or {})
+                    print(f"  {c(t('Enchant:','附魔:'), 'cyan')} {n(selection_info.get('name'))} — {selection_desc}")
                 print()
                 cards = state.get("cards", [])
                 for cd in cards:
@@ -1819,7 +2024,7 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                     rare_part = f" {c(t(rare, RARITY_ZH.get(rare, rare)), 'dim')}" if rare else ""
                     _p, sf = split_card_keywords(cd.get("keywords"))
                     sp = format_card_suffix_keywords(sf)
-                    print(f"  [{cd['index']}] {n(cd['name'])}{up} ({cd.get('cost','?')}) {c(ctype_label, 'dim')}{rare_part}{sp}")
+                    print(f"  [{cd['index']}] {n(cd['name'])}{up} ({card_energy_cost(cd)}) {c(ctype_label, 'dim')}{rare_part}{sp}")
                     print_card_detail_extension(cd, indent="      ")
 
                 valid = {str(cd["index"]): cd for cd in cards}
@@ -1980,35 +2185,45 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
                 print(f"  {t('Unknown state:','未知状态:')} {dec}")
                 state = send({"cmd": "action", "action": "proceed"})
 
-    except _QuitRequested:
-        quit_sent = False
-        quit_save_path = _quit_with_save(native_save_path, character, actual_seed)
-        # Retry loop: if save fails the process stays alive so we can try a different path.
+    except (_QuitRequested, KeyboardInterrupt):
+        quit_save_path = _quit_with_save(
+            native_save_path, character, actual_seed, run_finished=run_finished
+        )
         quit_sent = True
-        while True:
-            quit_cmd = {"cmd": "quit"}
-            if quit_save_path:
-                quit_cmd["path"] = quit_save_path
-            result = send(quit_cmd)
-            if result and result.get("type") == "save_error":
-                save_detail = result.get("save") or {}
-                msg = save_detail.get("message", "?")
-                print(f"  {c(t('Save failed:','存档失败:'), 'red')} {msg}")
-                try:
-                    ans = input(f"  {t('New path (Enter = quit without saving): ','新路径（回车则不保存退出）: ')}").strip()
-                except (EOFError, KeyboardInterrupt):
-                    ans = ""
-                quit_save_path = ans if ans else None
-            else:
-                _show_quit_save_result(result)
-                break
-    except KeyboardInterrupt:
-        print(f"\n  {c(t('Run abandoned.','已放弃本次运行。'), 'yellow')}")
+        quit_cmd = {"cmd": "quit"}
+        if quit_save_path:
+            quit_cmd["path"] = quit_save_path
+        result = send_raw(quit_cmd, record=False)
+        if run_finished:
+            _delete_active_save()
+        elif result and result.get("type") == "save_error" and os.path.isfile(ACTIVE_SAVE_PATH):
+            save_detail = result.get("save") or {}
+            print(f"  {c(t('Final save failed; keeping the latest autosave:','最终保存失败，已保留最近的自动存档：'), 'yellow')} "
+                  f"{save_detail.get('message', '?')}")
+            result = send_raw({"cmd": "quit"}, record=False)
+        if not run_finished:
+            _show_quit_save_result(result)
+    except _AbandonRequested:
+        abandoning = True
+        _delete_active_save()
+        quit_sent = True
+        restart_requested = True
+        try:
+            send_raw({"cmd": "quit"}, record=False)
+        except Exception:
+            pass
+        print(f"\n  {c(t('Run abandoned; autosave deleted.','已放弃本局，自动存档已删除。'), 'yellow')}")
     finally:
+        if use_tui:
+            _restore_terminal_for_prompt()
         if not quit_sent:
             try:
-                result = send({"cmd": "quit"})
-                _show_quit_save_result(result)
+                quit_cmd = {"cmd": "quit"}
+                if not abandoning and not run_finished:
+                    quit_cmd["path"] = ACTIVE_SAVE_PATH
+                result = send_raw(quit_cmd, record=False)
+                if not run_finished:
+                    _show_quit_save_result(result)
             except Exception:
                 pass
         logger.close()
@@ -2026,6 +2241,11 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=True,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Play Slay the Spire 2 in your terminal")
     parser.add_argument("--auto", action="store_true", help="Auto-play with simple AI")
+    ui_group = parser.add_mutually_exclusive_group()
+    ui_group.add_argument("--tui", action="store_true",
+                          help="Force the full-screen keyboard UI")
+    ui_group.add_argument("--cli", action="store_true",
+                          help="Use the legacy command input UI")
     parser.add_argument("--seed", type=str, default=None, help="Random seed")
     parser.add_argument("--character", type=str, default="Ironclad",
                        choices=["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"],
@@ -2036,8 +2256,12 @@ if __name__ == "__main__":
     parser.add_argument("--lang", type=str, default="zh",
                        choices=["en", "zh", "both"],
                        help="Display language: en, zh, or both")
-    parser.add_argument("--no-log", action="store_true",
-                       help="Disable game logging")
+    log_group = parser.add_mutually_exclusive_group()
+    log_group.add_argument("--log", dest="log", action="store_true",
+                           help="Enable game logging")
+    log_group.add_argument("--no-log", dest="log", action="store_false",
+                           help="Disable game logging (the default)")
+    parser.set_defaults(log=False)
     parser.add_argument("--load", type=str, default=None,
                        help="Load a save file (action replay)")
     parser.add_argument("--saves", action="store_true",
@@ -2119,11 +2343,86 @@ if __name__ == "__main__":
     next_auto = args.auto
     next_load_path = load_path
     next_native_save_path = native_save_path
+    next_character = args.character
+    next_ascension = args.ascension
+    next_log = args.log
+    use_tui = args.tui or (not args.cli and not args.auto and sys.stdin.isatty() and sys.stdout.isatty())
+    if args.tui and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        parser.error("--tui requires an interactive terminal")
+
+    initial_active_save = _active_save_summary()
+    if initial_active_save:
+        if next_load_path is not None:
+            parser.error(
+                "An active run already exists. Continue or abandon it before loading another run."
+            )
+        if next_native_save_path is not None and (
+            os.path.realpath(next_native_save_path) != os.path.realpath(ACTIVE_SAVE_PATH)
+        ):
+            parser.error(
+                "An active run already exists. Continue or abandon it before loading another run."
+            )
+        explicit_new_run = any(
+            argument == option or argument.startswith(option + "=")
+            for argument in sys.argv[1:]
+            for option in ("--seed", "--character", "--ascension")
+        )
+        if not use_tui and explicit_new_run:
+            parser.error(
+                "An active run already exists. Continue it, then use 'abandon' before starting a new run."
+            )
+        if not use_tui:
+            next_native_save_path = ACTIVE_SAVE_PATH
+
     while True:
-        restart = play(character=args.character, seed=next_seed, auto=next_auto,
-                       ascension=args.ascension, log=not args.no_log,
+        if use_tui and next_load_path is None and next_native_save_path is None:
+            try:
+                from tui import run_setup_tui
+            except ImportError:
+                use_tui = False
+                print(t("Full-screen TUI is unavailable; falling back to CLI.",
+                        "全屏 TUI 不可用，已回退到 CLI。"))
+            else:
+                setup_result = run_setup_tui(
+                    character=next_character,
+                    ascension=next_ascension,
+                    lang=LANG,
+                    seed=next_seed,
+                    log_enabled=next_log,
+                    saves=_list_saves(),
+                    active_save=_active_save_summary(),
+                )
+                if setup_result is None:
+                    break
+                LANG = setup_result["lang"]
+                next_log = setup_result["log"]
+                if setup_result.get("abandon_active"):
+                    _delete_active_save()
+                    next_seed = None
+                    next_load_path = None
+                    next_native_save_path = None
+                    next_character = args.character
+                    next_ascension = args.ascension
+                    continue
+                selected_save = setup_result.get("load_path")
+                if selected_save:
+                    next_character = setup_result.get("character", next_character)
+                    if setup_result.get("load_type") == "native":
+                        next_native_save_path = selected_save
+                        next_load_path = None
+                    else:
+                        next_load_path = selected_save
+                        next_native_save_path = None
+                else:
+                    next_character = setup_result["character"]
+                    next_ascension = setup_result["ascension"]
+                    next_seed = setup_result["seed"]
+
+        restart = play(character=next_character, seed=next_seed, auto=next_auto,
+                       ascension=next_ascension, log=next_log,
                        load_path=next_load_path,
-                       native_save_path=next_native_save_path)
+                       native_save_path=next_native_save_path,
+                       use_tui=use_tui)
         if not restart:
             break
         next_seed = None
