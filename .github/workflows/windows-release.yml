@@ -16,22 +16,20 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
+      - name: Install Windows packaging dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r packaging/windows/requirements-build.txt
+
       - name: Build Windows package
         shell: pwsh
-        run: |
-          try {
-            ./packaging/windows/build-release.ps1 -Python python
-          } catch {
-            Write-Host "::error title=Windows packaging failed::$($_.Exception.Message)"
-            throw
-          }
+        run: ./packaging/windows/build-release.ps1 -Python python -SkipDependencyInstall
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
