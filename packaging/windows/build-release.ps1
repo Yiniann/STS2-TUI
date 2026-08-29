@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 trap {
     Write-Output "::error file=packaging/windows/build-release.ps1,title=Windows packaging failed::$($_.Exception.Message)"
     exit 1
@@ -69,7 +70,9 @@ if ($BuildArchive) {
     $sourceTarget = Join-Path $StageDirectory "src"
     New-Item -ItemType Directory -Path $sourceTarget -Force | Out-Null
     & robocopy (Join-Path $RepoDir "src") $sourceTarget /E /XD bin obj | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "Could not copy backend source (robocopy exit $LASTEXITCODE)" }
+    $RobocopyExitCode = $LASTEXITCODE
+    if ($RobocopyExitCode -ge 8) { throw "Could not copy backend source (robocopy exit $RobocopyExitCode)" }
+    $global:LASTEXITCODE = 0
 
     Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path $StageDirectory -DestinationPath $ZipPath -CompressionLevel Optimal
