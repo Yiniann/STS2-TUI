@@ -25,7 +25,13 @@ jobs:
 
       - name: Build Windows package
         shell: pwsh
-        run: ./packaging/windows/build-release.ps1 -Python python
+        run: |
+          try {
+            ./packaging/windows/build-release.ps1 -Python python
+          } catch {
+            Write-Host "::error title=Windows packaging failed::$($_.Exception.Message)"
+            throw
+          }
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
