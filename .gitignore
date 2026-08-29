@@ -13,3 +13,6 @@ obj/
 .obsidian/
 logs/
 saves/*
+/artifacts/
+/build/
+/dist/

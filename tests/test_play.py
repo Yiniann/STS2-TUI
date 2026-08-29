@@ -55,3 +55,26 @@ def test_delete_active_save(monkeypatch, tmp_path):
     assert play._delete_active_save()
     assert not active.exists()
     assert not play._delete_active_save()
+
+
+def test_backend_command_prefers_built_dll(monkeypatch, tmp_path):
+    backend = tmp_path / "src" / "Sts2Headless" / "bin" / "Release" / "net9.0" / "Sts2Headless.dll"
+    backend.parent.mkdir(parents=True)
+    backend.write_bytes(b"test")
+    monkeypatch.setattr(play, "ROOT", str(tmp_path))
+    monkeypatch.setattr(play, "BUILD_CONFIGURATION", "Release")
+    monkeypatch.setattr(play, "DOTNET", "dotnet")
+
+    assert play._backend_command() == ["dotnet", str(backend)]
+
+
+def test_backend_command_falls_back_to_project(monkeypatch, tmp_path):
+    project = tmp_path / "src" / "Sts2Headless" / "Sts2Headless.csproj"
+    monkeypatch.setattr(play, "ROOT", str(tmp_path))
+    monkeypatch.setattr(play, "PROJECT", str(project))
+    monkeypatch.setattr(play, "BUILD_CONFIGURATION", "Release")
+    monkeypatch.setattr(play, "DOTNET", "dotnet")
+
+    assert play._backend_command() == [
+        "dotnet", "run", "--no-build", "--project", str(project),
+    ]

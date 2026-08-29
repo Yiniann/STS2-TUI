@@ -15,15 +15,27 @@ import sys
 import os
 import argparse
 import random
+import platform
+import shutil
 import threading
 from collections import deque
 from game_log import GameLogger
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _application_root():
+    """Return the checkout or extracted release directory."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+ROOT = _application_root()
 PROJECT = os.path.join(ROOT, "src", "Sts2Headless", "Sts2Headless.csproj")
 LIB_DIR = os.path.join(ROOT, "lib")
 SAVE_DIR = os.path.join(ROOT, "saves")
 ACTIVE_SAVE_PATH = os.path.join(SAVE_DIR, "current_run.save")
+BUILD_CONFIGURATION = "Release" if IS_FROZEN else "Debug"
 
 
 def _find_dotnet():
@@ -132,11 +144,49 @@ def _patch_dll():
     subprocess.run(["bash", setup_sh], cwd=ROOT)
 
 
+def _run_windows_setup(game_dir=None):
+    """Run the native Windows first-time setup without requiring Python."""
+    setup_script = os.path.join(ROOT, "setup.ps1")
+    if not os.path.isfile(setup_script):
+        return False
+    powershell = "pwsh" if shutil.which("pwsh") else "powershell.exe"
+    command = [
+        powershell,
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", setup_script,
+    ]
+    if game_dir:
+        command.extend(["-GameDir", game_dir])
+    try:
+        return subprocess.run(command, cwd=ROOT).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _backend_dll_path():
+    return os.path.join(
+        ROOT, "src", "Sts2Headless", "bin", BUILD_CONFIGURATION,
+        "net9.0", "Sts2Headless.dll",
+    )
+
+
+def _backend_command():
+    backend = _backend_dll_path()
+    if os.path.isfile(backend):
+        return [DOTNET, backend]
+    return [DOTNET, "run", "--no-build", "--project", PROJECT]
+
+
 def _build():
     """Build the C# project."""
     if not DOTNET:
         return False
-    r = subprocess.run([DOTNET, "build", PROJECT], capture_output=True, text=True, timeout=60)
+    r = subprocess.run(
+        [DOTNET, "build", PROJECT, "--configuration", BUILD_CONFIGURATION],
+        capture_output=True, text=True, timeout=120, cwd=ROOT,
+    )
     return r.returncode == 0
 
 
@@ -154,14 +204,19 @@ def ensure_setup():
     sts2_dll = os.path.join(LIB_DIR, "sts2.dll")
     if not os.path.isfile(sts2_dll):
         print("📦 Game DLLs not found. Running first-time setup...")
-        game_dir = _find_game_dir()
-        if not game_dir:
-            print("❌ Could not find Slay the Spire 2 installation.")
-            print("   Install the game via Steam, then run again.")
-            print("   Or run: ./setup.sh /path/to/game/data")
-            sys.exit(1)
-        print(f"  Found game at: {game_dir}")
-        _copy_dlls(game_dir)
+        if platform.system() == "Windows" and os.path.isfile(os.path.join(ROOT, "setup.ps1")):
+            if not _run_windows_setup():
+                print("❌ Windows setup failed. Run setup.ps1 to see the full error.")
+                sys.exit(1)
+        else:
+            game_dir = _find_game_dir()
+            if not game_dir:
+                print("❌ Could not find Slay the Spire 2 installation.")
+                print("   Install the game via Steam, then run again.")
+                print("   Or run: ./setup.sh /path/to/game/data")
+                sys.exit(1)
+            print(f"  Found game at: {game_dir}")
+            _copy_dlls(game_dir)
         if not os.path.isfile(sts2_dll):
             print("❌ Failed to copy sts2.dll")
             sys.exit(1)
@@ -171,8 +226,7 @@ def ensure_setup():
         os.environ["STS2_GAME_DIR"] = LIB_DIR
 
     # Check if built
-    exe_dir = os.path.join(ROOT, "src", "Sts2Headless", "bin", "Debug", "net9.0")
-    exe = os.path.join(exe_dir, "Sts2Headless.dll")
+    exe = _backend_dll_path()
     if not os.path.isfile(exe) or os.path.getmtime(sts2_dll) > os.path.getmtime(exe):
         print("🏗️  Building...")
         if not _build():
@@ -1635,9 +1689,10 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=False,
     logger = GameLogger(character, actual_seed, enabled=log)
     action_log = []
     proc = subprocess.Popen(
-        [DOTNET, "run", "--no-build", "--project", PROJECT],
+        _backend_command(),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, bufsize=1,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
+        cwd=ROOT,
     )
     stderr_tail = deque(maxlen=200)
 
