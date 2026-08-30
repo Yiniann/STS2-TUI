@@ -179,6 +179,28 @@ def _backend_command():
     return [DOTNET, "run", "--no-build", "--project", PROJECT]
 
 
+def _backend_needs_build(backend, game_dll):
+    if not os.path.isfile(backend):
+        return True
+    backend_mtime = os.path.getmtime(backend)
+    if os.path.getmtime(game_dll) > backend_mtime:
+        return True
+    if IS_FROZEN:
+        return False
+
+    for source_root in (
+        os.path.join(ROOT, "src", "Sts2Headless"),
+        os.path.join(ROOT, "src", "GodotStubs"),
+    ):
+        for current_root, _, files in os.walk(source_root):
+            for name in files:
+                if not name.endswith((".cs", ".csproj")):
+                    continue
+                if os.path.getmtime(os.path.join(current_root, name)) > backend_mtime:
+                    return True
+    return False
+
+
 def _build():
     """Build the C# project."""
     if not DOTNET:
@@ -227,7 +249,7 @@ def ensure_setup():
 
     # Check if built
     exe = _backend_dll_path()
-    if not os.path.isfile(exe) or os.path.getmtime(sts2_dll) > os.path.getmtime(exe):
+    if _backend_needs_build(exe, sts2_dll):
         print("🏗️  Building...")
         if not _build():
             print("❌ Build failed. Try: ./setup.sh")
@@ -2062,7 +2084,21 @@ def play(character="Ironclad", seed=None, auto=False, ascension=0, log=False,
                     print(f"  {c(n(ctx.get('act_name','?')), 'dim')} {t('Floor','层')} {ctx.get('floor','?')}")
                 min_sel = state.get("min_select", 1)
                 max_sel = state.get("max_select", 1)
-                print(f"  {c(t('Choose cards','选择卡牌'), 'bold')} — {card_pick_quantity_hint(min_sel, max_sel)}")
+                selection_title = state.get("selection_title")
+                if selection_title:
+                    selection_title = resolve_template(
+                        desc(selection_title), state.get("selection_title_vars") or {})
+                else:
+                    selection_kind = state.get("selection_kind")
+                    selection_title = {
+                        "upgrade": t("Choose cards to upgrade", "选择要升级的牌"),
+                        "remove": t("Choose cards to remove", "选择要移除的牌"),
+                        "transform": t("Choose cards to transform", "选择要变化的牌"),
+                        "enchant": t("Choose cards to enchant", "选择要附魔的牌"),
+                        "discard": t("Choose cards to discard", "选择要丢弃的牌"),
+                        "exhaust": t("Choose cards to exhaust", "选择要消耗的牌"),
+                    }.get(selection_kind, t("Choose cards", "选择卡牌"))
+                print(f"  {c(selection_title, 'bold')} — {card_pick_quantity_hint(min_sel, max_sel)}")
                 show_player(state.get("player", {}))
                 selection_info = state.get("selection_info") or {}
                 selection_desc = desc(selection_info.get("description")) if selection_info else ""

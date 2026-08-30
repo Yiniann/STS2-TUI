@@ -63,6 +63,19 @@ def _name(value):
     return str(value) if value is not None else "?"
 
 
+def _error_message(value, translate):
+    message = _name(value)
+    translations = {
+        "Not enough gold": ("Not enough gold", "金币不足"),
+        "Not enough gold for Crystal Sphere divination": (
+            "Not enough gold for Crystal Sphere divination",
+            "金币不足，无法进行水晶球占卜",
+        ),
+    }
+    localized = translations.get(message)
+    return translate(*localized) if localized else message
+
+
 def _card_cost(card, field="cost"):
     flag = "cost_is_x" if field == "cost" else f"{field}_is_x"
     return "X" if card.get(flag) else card.get(field, "?")
@@ -191,6 +204,40 @@ def _description(item, *, in_combat=False, lang="zh"):
         if count == 0:
             break
     return text.strip()
+
+
+def _card_selection_title(state, translate, *, lang="zh"):
+    raw_title = state.get("selection_title")
+    if raw_title:
+        title = _description({
+            "description": raw_title,
+            "description_vars": state.get("selection_title_vars") or {},
+        }, lang=lang)
+        if title:
+            return title
+
+    kind = state.get("selection_kind")
+    minimum = state.get("min_select", 1)
+    maximum = state.get("max_select", 1)
+    if minimum == maximum == 1:
+        en_count, zh_count = "a card", "一张牌"
+    elif minimum == maximum:
+        en_count, zh_count = f"{minimum} cards", f"{minimum} 张牌"
+    elif minimum == 0:
+        en_count, zh_count = f"up to {maximum} cards", f"至多 {maximum} 张牌"
+    else:
+        en_count, zh_count = f"{minimum}-{maximum} cards", f"{minimum}-{maximum} 张牌"
+    fallback = {
+        "upgrade": (f"Choose {en_count} to upgrade", f"选择{zh_count}升级"),
+        "remove": (f"Choose {en_count} to remove", f"选择{zh_count}移除"),
+        "transform": (f"Choose {en_count} to transform", f"选择{zh_count}变化"),
+        "enchant": (f"Choose {en_count} to enchant", f"选择{zh_count}附魔"),
+        "discard": ("Choose cards to discard", "选择要丢弃的牌"),
+        "exhaust": ("Choose cards to exhaust", "选择要消耗的牌"),
+    }
+    if kind in fallback:
+        return translate(*fallback[kind])
+    return translate("Choose cards", "选择卡牌")
 
 
 def _intent(enemy, translate=None):
@@ -1101,6 +1148,9 @@ class Tui:
         self.pending_reward_potions = []
         self.pending_reward_cards = []
         self.pending_reward_title = self.t("Combat rewards", "战斗奖励")
+        self._combat_snapshot = (
+            self.state if self.state.get("decision") == "combat_play" else None
+        )
         self.message = _name(self.state.get("autosave_error")) if self.state.get("autosave_error") else ""
         self.map_cache = None
         self.map_scroll = 0
@@ -1853,20 +1903,20 @@ class Tui:
             "card_reward": self.t("Card reward", "卡牌奖励"),
             "bundle_select": self.t("Choose a card pack", "选择卡牌包"),
             "potion_replace": self.t("Potion slots full", "药水栏已满"),
-            "card_select": self.t("Choose cards", "选择卡牌"),
+            "card_select": _card_selection_title(self.state, self.t, lang=self.lang),
             "shop": self.t("Merchant", "商店"),
             "rest_site": self.t("Rest site", "休息处"),
             "event_choice": _name(self.state.get("event_name") or self.t("Event", "事件")),
         }
-        if dec == "card_select" and self.state.get("selection_kind") == "upgrade":
-            titles["card_select"] = self.t("Upgrade one card", "升级一张牌")
-        elif dec == "card_select" and self.state.get("selection_kind") == "discard":
-            titles["card_select"] = self.t("Choose cards to discard", "选择要丢弃的牌")
-        title = self.state.get("selection_title") or titles.get(dec, dec)
+        title = titles.get(dec, dec)
         self.box(2, 2, h - 4, w - 4, title)
         y = 4
         if dec == "event_choice":
-            for line in _wrap(self.state.get("description") or "", w - 10)[:3]:
+            event_description = _description({
+                "description": self.state.get("description") or "",
+                "description_vars": self.state.get("description_vars") or {},
+            }, lang=self.lang)
+            for line in _wrap(event_description, w - 10)[:3]:
                 self.add(y, 5, line, curses.A_DIM, w - 10)
                 y += 1
             y += 1
@@ -2500,12 +2550,24 @@ class Tui:
         new_state = self.send(cmd)
         if new_state:
             if new_state.get("type") == "error":
-                self.message = _name(new_state.get("message"))
+                self.message = _error_message(new_state.get("message"), self.t)
             else:
                 removed_cards, added_cards = _deck_card_changes(old_state, new_state)
-                all_combat_added = _added_combat_cards(old_state, new_state)
+                combat_baseline = (
+                    old_state if old_dec == "combat_play"
+                    else getattr(self, "_combat_snapshot", None)
+                )
+                if not combat_baseline and new_state.get("decision") == "combat_play":
+                    combat_baseline = {
+                        "draw_pile": (old_state.get("player") or {}).get("deck") or [],
+                    }
+                all_combat_added = (
+                    _added_combat_cards(combat_baseline, new_state)
+                    if combat_baseline else []
+                )
+                combat_comparison_state = combat_baseline or old_state
                 returned_cards = _returned_stolen_cards(
-                    old_state, new_state, added_cards, all_combat_added,
+                    combat_comparison_state, new_state, added_cards, all_combat_added,
                 )
                 added_cards = _without_matching_cards(added_cards, returned_cards)
                 added_relics = _added_player_items(old_state, new_state, "relics")
@@ -2519,9 +2581,9 @@ class Tui:
                     and old_dec == "crystal_sphere"
                     and new_state.get("decision") != "crystal_sphere"
                 )
-                combat_added = all_combat_added if action == "end_turn" else []
+                combat_added = _without_matching_cards(all_combat_added, returned_cards)
                 hostile_cards = [card for card in combat_added if card.get("type") in ("Status", "Curse")]
-                stolen_cards = _newly_stolen_cards(old_state, new_state)
+                stolen_cards = _newly_stolen_cards(combat_comparison_state, new_state)
                 self.state = new_state
                 self.message = (
                     _name(new_state.get("autosave_error"))
@@ -2530,6 +2592,10 @@ class Tui:
                 self.target_cursor = None
                 self.pending = None
                 new_dec = self.state.get("decision")
+                if new_dec == "combat_play":
+                    self._combat_snapshot = new_state
+                elif new_dec != "card_select":
+                    self._combat_snapshot = None
                 selection_decisions = {"card_select", "card_reward", "bundle_select", "potion_replace"}
                 combat_reward_started = (
                     new_dec == "card_reward"
@@ -2590,9 +2656,15 @@ class Tui:
                     grid_h = self.state.get("height", 11)
                     self.cursor = (grid_h // 2) * grid_w + grid_w // 2
                 if returned_cards:
-                    self.acquired_cards = returned_cards
+                    self.acquired_cards = returned_cards + hostile_cards
                     self.acquired_previous_cards = []
-                    self.acquired_title = self.t("Cards returned", "卡牌已归还")
+                    self.acquired_title = (
+                        self.t(
+                            "Cards returned / Enemy added cards",
+                            "卡牌已归还 / 敌人加入卡牌",
+                        )
+                        if hostile_cards else self.t("Cards returned", "卡牌已归还")
+                    )
                     self.overlay = "acquired"
                     self.overlay_cursor = 0
                 elif self.pending_reward and new_dec in selection_decisions:
@@ -2646,9 +2718,15 @@ class Tui:
                     self.overlay = "acquired"
                     self.overlay_cursor = 0
                 elif stolen_cards:
-                    self.acquired_cards = stolen_cards
+                    self.acquired_cards = stolen_cards + hostile_cards
                     self.acquired_previous_cards = []
-                    self.acquired_title = self.t("Card stolen", "卡牌被偷走")
+                    self.acquired_title = (
+                        self.t(
+                            "Card stolen / Enemy added cards",
+                            "卡牌被偷走 / 敌人加入卡牌",
+                        )
+                        if hostile_cards else self.t("Card stolen", "卡牌被偷走")
+                    )
                     self.overlay = "acquired"
                     self.overlay_cursor = 0
                 elif (added_relics or added_potions) and action not in ("buy_relic", "buy_potion"):

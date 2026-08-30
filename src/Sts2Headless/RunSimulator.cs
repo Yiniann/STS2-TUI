@@ -183,10 +183,17 @@ internal class LocLookup
         var result = Bilingual("powers", key);
         if (result == key && entry.EndsWith("_POWER", StringComparison.Ordinal))
         {
-            var potionEntry = entry[..^"_POWER".Length];
-            var potionKey = potionEntry + ".title";
+            var sourceEntry = entry[..^"_POWER".Length];
+            var potionKey = sourceEntry + ".title";
             var potionResult = Bilingual("potions", potionKey);
             if (potionResult != potionKey) return potionResult;
+
+            // Some cards grant a one-turn power named after the card itself (for
+            // example HOTFIX_POWER and PIERCING_WAIL_POWER). These powers do not
+            // have standalone entries in powers.json.
+            var cardKey = sourceEntry + ".title";
+            var cardResult = Bilingual("cards", cardKey);
+            if (cardResult != cardKey) return cardResult;
         }
         return result;
     }
@@ -197,10 +204,14 @@ internal class LocLookup
         var result = Bilingual("powers", key);
         if (result == key && entry.EndsWith("_POWER", StringComparison.Ordinal))
         {
-            var potionEntry = entry[..^"_POWER".Length];
-            var potionKey = potionEntry + ".description";
+            var sourceEntry = entry[..^"_POWER".Length];
+            var potionKey = sourceEntry + ".description";
             var potionResult = Bilingual("potions", potionKey);
             if (potionResult != potionKey) return potionResult;
+
+            var cardKey = sourceEntry + ".description";
+            var cardResult = Bilingual("cards", cardKey);
+            if (cardResult != cardKey) return cardResult;
         }
         return result;
     }
@@ -228,19 +239,25 @@ internal class LocLookup
 
     public string LocalizeModelName(string value)
     {
+        // Card-name variables append '+' after the localization key when the selected
+        // card is upgraded (for example "HEADBUTT.title+"). Localize the undecorated
+        // key, then preserve the upgrade marker in the displayed name.
+        var undecorated = value.TrimEnd('+');
+        var suffix = value[undecorated.Length..];
+
         // Some StringVars already contain a localization key (for example
         // THIS_OR_THAT's Curse value is "CLUMSY.title"), not an English model name.
-        var localizedKey = BilingualFromKey(value);
-        if (localizedKey != value) return localizedKey;
+        var localizedKey = BilingualFromKey(undecorated);
+        if (localizedKey != undecorated) return localizedKey + suffix;
 
-        var entry = value.Contains('.', StringComparison.Ordinal)
-            ? value[(value.LastIndexOf('.') + 1)..]
-            : value;
+        var entry = undecorated.Contains('.', StringComparison.Ordinal)
+            ? undecorated[(undecorated.LastIndexOf('.') + 1)..]
+            : undecorated;
         foreach (var tableName in new[] { "cards", "relics", "potions", "monsters", "enchantments" })
         {
             var directKey = entry + ".title";
             var direct = Bilingual(tableName, directKey);
-            if (direct != directKey) return direct;
+            if (direct != directKey) return direct + suffix;
 
             if (!_eng.TryGetValue(tableName, out var entries)) continue;
             foreach (var (key, english) in entries)
@@ -248,8 +265,8 @@ internal class LocLookup
                 if (!key.EndsWith(".title", StringComparison.Ordinal)
                     && !key.EndsWith(".name", StringComparison.Ordinal))
                     continue;
-                if (string.Equals(english, value, StringComparison.Ordinal))
-                    return Bilingual(tableName, key);
+                if (string.Equals(english, undecorated, StringComparison.Ordinal))
+                    return Bilingual(tableName, key) + suffix;
             }
         }
         return value;
@@ -345,6 +362,8 @@ public class RunSimulator
     private readonly HeadlessCardSelector _cardSelector = new();
     private Dictionary<string, object?>? _pendingSelectionInfo;
     private string? _pendingSelectionKind;
+    private string? _pendingSelectionTitle;
+    private Dictionary<string, object?>? _pendingSelectionTitleVars;
     // A room/relic action can pause inside the headless selector. Keep its task so the
     // response after select_cards/card_reward is serialized only after that action resumes.
     private Task? _pendingSelectionTask;
@@ -1189,6 +1208,8 @@ public class RunSimulator
         _pendingRewards = null;
         _pendingSelectionInfo = null;
         _pendingSelectionKind = null;
+        _pendingSelectionTitle = null;
+        _pendingSelectionTitleVars = null;
         _pendingSelectionTask = null;
         _pendingSelectionTaskSource = null;
         _pendingCrystalSphere = null;
@@ -1685,6 +1706,8 @@ public class RunSimulator
             var inv = merchantRoom.GetLocalInventory();
             var relicName = entry.Model?.GetType().Name ?? "?";
             _pendingSelectionKind = null;
+            _pendingSelectionTitle = null;
+            _pendingSelectionTitleVars = null;
             var task = Task.Run(() => entry.OnTryPurchaseWrapper(inv));
             // Keep pumping until the purchase has either completed or exposed an actual
             // selection. Returning while the task is merely still running serializes the old
@@ -2157,6 +2180,8 @@ public class RunSimulator
                     {
                         _pendingSelectionInfo = null;
                         _pendingSelectionKind = null;
+                        _pendingSelectionTitle = null;
+                        _pendingSelectionTitleVars = null;
                         var eventVars = new Dictionary<string, object?>();
                         try
                         {
@@ -2167,6 +2192,31 @@ public class RunSimulator
                         catch { }
                         _pendingSelectionInfo = EventEnchantmentInfo(
                             options[optionIndex].TextKey, eventVars);
+                        var optionDescription = options[optionIndex].Description;
+                        if (optionDescription != null &&
+                            !string.IsNullOrEmpty(optionDescription.LocEntryKey))
+                        {
+                            var localizedDescription = _loc.Bilingual(
+                                optionDescription.LocTable, optionDescription.LocEntryKey);
+                            if (localizedDescription != optionDescription.LocEntryKey)
+                            {
+                                _pendingSelectionTitle = localizedDescription;
+                                _pendingSelectionTitleVars = LocVariables(
+                                    optionDescription, eventVars);
+                            }
+                        }
+                        if (string.IsNullOrEmpty(_pendingSelectionTitle) &&
+                            !string.IsNullOrEmpty(options[optionIndex].TextKey))
+                        {
+                            var optionEntry = options[optionIndex].TextKey.Split('.')[^1];
+                            try
+                            {
+                                var optionRelic = ModelDb.GetById<RelicModel>(
+                                    new ModelId("RELIC", optionEntry)).ToMutable();
+                                SetPendingSelectionContextFromRelic(optionRelic);
+                            }
+                            catch { }
+                        }
                         _eventOptionChosen = true;
                         _lastEventOptionCount = options.Count;
                         // Run on thread pool so GetSelectedCards/GetSelectedCardReward can block
@@ -2467,7 +2517,10 @@ public class RunSimulator
                 ["context"] = RunContext(),
                 ["selection_title"] = isKnowledgeCurse
                     ? _loc.Bilingual("monsters", "KNOWLEDGE_DEMON.moves.CURSE_OF_KNOWLEDGE.title")
-                    : null,
+                    : _pendingSelectionTitle,
+                ["selection_title_vars"] = isKnowledgeCurse
+                    ? null
+                    : _pendingSelectionTitleVars,
                 ["selection_kind"] = _pendingSelectionKind,
                 ["cards"] = opts,
                 ["min_select"] = isKnowledgeCurse ? 1 : _cardSelector.PendingMinSelect,
@@ -3555,11 +3608,25 @@ public class RunSimulator
 
         // Resolve event description, suppress if key not found
         string? eventDesc = null;
+        Dictionary<string, object?>? eventDescVars = null;
         if (localEvent.Description != null)
         {
             var d = _loc.Bilingual(localEvent.Description.LocTable, localEvent.Description.LocEntryKey);
             if (d != localEvent.Description.LocEntryKey)
                 eventDesc = d;
+
+            Dictionary<string, object?>? eventVars = null;
+            try
+            {
+                if (localEvent.DynamicVars?.Values != null)
+                {
+                    eventVars = new Dictionary<string, object?>();
+                    foreach (var dynamicVar in localEvent.DynamicVars.Values)
+                        eventVars[dynamicVar.Name] = DynamicVarDisplayValue(dynamicVar);
+                }
+            }
+            catch { }
+            eventDescVars = LocVariables(localEvent.Description, eventVars);
         }
 
         return new Dictionary<string, object?>
@@ -3569,6 +3636,7 @@ public class RunSimulator
             ["context"] = RunContext(),
             ["event_name"] = eventName,
             ["description"] = eventDesc,
+            ["description_vars"] = eventDescVars?.Count > 0 ? eventDescVars : null,
             ["options"] = options,
             ["player"] = PlayerSummary(_runState!.Players[0]),
         };
@@ -3690,6 +3758,49 @@ public class RunSimulator
             ["description"] = _loc.Bilingual("relics", entry + ".description"),
             ["vars"] = relicVars.Count > 0 ? relicVars : null,
         };
+    }
+
+    private static string? SelectionKindFromDescription(string? description)
+    {
+        if (string.IsNullOrWhiteSpace(description)) return null;
+        if (description.Contains("remove", StringComparison.OrdinalIgnoreCase)) return "remove";
+        if (description.Contains("transform", StringComparison.OrdinalIgnoreCase)) return "transform";
+        if (description.Contains("enchant", StringComparison.OrdinalIgnoreCase)) return "enchant";
+        if (description.Contains("upgrade", StringComparison.OrdinalIgnoreCase)) return "upgrade";
+        if (description.Contains("exhaust", StringComparison.OrdinalIgnoreCase)) return "exhaust";
+        if (description.Contains("discard", StringComparison.OrdinalIgnoreCase)) return "discard";
+        return null;
+    }
+
+    private void SetPendingSelectionContextFromRelic(RelicModel relic)
+    {
+        var entry = relic.Id.Entry;
+        var eventDescriptionKey = entry + ".eventDescription";
+        var descriptionKey = entry + ".description";
+        var englishDescription = _loc.En("relics", eventDescriptionKey)
+            ?? _loc.En("relics", descriptionKey);
+        var selectionKind = SelectionKindFromDescription(englishDescription);
+        if (selectionKind == null)
+            return;
+
+        var localizedDescription = _loc.Bilingual("relics", eventDescriptionKey);
+        if (localizedDescription == eventDescriptionKey)
+            localizedDescription = _loc.Bilingual("relics", descriptionKey);
+        if (localizedDescription == descriptionKey)
+            return;
+
+        var vars = new Dictionary<string, object?>();
+        try
+        {
+            foreach (var dynamicVar in relic.DynamicVars.Values)
+                vars[dynamicVar.Name] = DynamicVarDisplayValue(dynamicVar);
+        }
+        catch { }
+
+        _pendingSelectionTitle = localizedDescription;
+        _pendingSelectionTitleVars = vars.Count > 0 ? vars : null;
+        _pendingSelectionKind = selectionKind;
+        Log($"Relic selection context: {entry} ({selectionKind})");
     }
 
     private Dictionary<string, object?> RestSiteState(RestSiteRoom restRoom)
@@ -4017,6 +4128,8 @@ public class RunSimulator
             WaitForActionExecutor();
             _pendingSelectionInfo = null;
             _pendingSelectionKind = null;
+            _pendingSelectionTitle = null;
+            _pendingSelectionTitleVars = null;
             return;
         }
 
@@ -4044,13 +4157,15 @@ public class RunSimulator
         try { task.GetAwaiter().GetResult(); }
         catch (Exception ex)
         {
-            Log($"{_pendingSelectionTaskSource ?? "selection action"}: completion failed: {ex.Message}");
+            Log($"{_pendingSelectionTaskSource ?? "selection action"}: completion failed: {ex}");
         }
 
         _pendingSelectionTask = null;
         _pendingSelectionTaskSource = null;
         _pendingSelectionInfo = null;
         _pendingSelectionKind = null;
+        _pendingSelectionTitle = null;
+        _pendingSelectionTitleVars = null;
         _syncCtx.Pump();
         WaitForActionExecutor();
     }
@@ -4286,6 +4401,10 @@ public class RunSimulator
         // Event-only screen shake is another visual call whose singleton is unavailable
         // without a Godot scene tree (for example Dense Vegetation after resting).
         PatchDenseVegetationScreenRumble();
+
+        // Amalgamator shakes the screen twice after cards are selected. Keep its deck
+        // changes and completion page, but remove the Godot-only visual calls.
+        PatchAmalgamatorScreenShake();
 
         // Trial.Accept updates the event state after several portrait-only Godot calls.
         // Suppress those local visuals so the guilty/innocent choice remains playable.
@@ -4575,6 +4694,38 @@ public class RunSimulator
         }
     }
 
+    private static void PatchAmalgamatorScreenShake()
+    {
+        try
+        {
+            var transpiler = typeof(YieldPatches).GetMethod(
+                nameof(YieldPatches.AmalgamatorScreenShakeTranspiler),
+                BindingFlags.Static | BindingFlags.Public);
+            if (transpiler == null) return;
+
+            var harmony = new Harmony("sts2headless.amalgamatorscreenshake");
+            var patched = 0;
+            foreach (var methodName in new[] { "CombineStrikes", "CombineDefends" })
+            {
+                var method = typeof(MegaCrit.Sts2.Core.Models.Events.Amalgamator)
+                    .GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
+                var stateMachineType = method?
+                    .GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>()?
+                    .StateMachineType;
+                var moveNext = stateMachineType?.GetMethod(
+                    "MoveNext", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (moveNext == null) continue;
+                harmony.Patch(moveNext, transpiler: new HarmonyMethod(transpiler));
+                patched++;
+            }
+            Console.Error.WriteLine($"[INFO] Patched Amalgamator screen shake for headless mode ({patched} methods)");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARN] Failed to patch Amalgamator screen shake: {ex.Message}");
+        }
+    }
+
     private static void PatchTaskYield()
     {
         try
@@ -4851,6 +5002,31 @@ public class RunSimulator
             MegaCrit.Sts2.Core.Nodes.Vfx.Utilities.RumbleStyle style)
         {
         }
+
+        public static IEnumerable<CodeInstruction> AmalgamatorScreenShakeTranspiler(
+            IEnumerable<CodeInstruction> instructions)
+        {
+            var shake = AccessTools.Method(
+                typeof(MegaCrit.Sts2.Core.Nodes.NGame), "ScreenShakeTrauma",
+                new[] { typeof(MegaCrit.Sts2.Core.Nodes.Vfx.Utilities.ShakeStrength) });
+            var noOp = AccessTools.Method(
+                typeof(YieldPatches), nameof(AmalgamatorScreenShakeNoOp));
+            foreach (var instruction in instructions)
+            {
+                if (shake != null && noOp != null && instruction.Calls(shake))
+                {
+                    instruction.opcode = System.Reflection.Emit.OpCodes.Call;
+                    instruction.operand = noOp;
+                }
+                yield return instruction;
+            }
+        }
+
+        public static void AmalgamatorScreenShakeNoOp(
+            MegaCrit.Sts2.Core.Nodes.NGame? game,
+            MegaCrit.Sts2.Core.Nodes.Vfx.Utilities.ShakeStrength strength)
+        {
+        }
     }
 
     private static void InitLocManager()
@@ -5058,6 +5234,37 @@ public class RunSimulator
             }
             catch (Exception ex) { Console.Error.WriteLine($"[WARN] Hand selection context patch: {ex.Message}"); }
 
+            try
+            {
+                var relicPrefix = typeof(LocPatches).GetMethod(
+                    nameof(LocPatches.RelicObtainPrefix),
+                    BindingFlags.Static | BindingFlags.Public);
+                var patched = 0;
+                if (relicPrefix != null)
+                {
+                    foreach (var obtainMethod in typeof(RelicCmd).GetMethods(
+                        BindingFlags.Static | BindingFlags.Public)
+                        .Where(method => method.Name == "Obtain"))
+                    {
+                        try
+                        {
+                            if (obtainMethod.ContainsGenericParameters ||
+                                obtainMethod.GetMethodBody() == null)
+                                continue;
+                            harmony.Patch(obtainMethod, new HarmonyMethod(relicPrefix));
+                            patched++;
+                        }
+                        catch (Exception methodEx)
+                        {
+                            Console.Error.WriteLine(
+                                $"[WARN] Relic context skipped {obtainMethod}: {methodEx.Message}");
+                        }
+                    }
+                }
+                Console.Error.WriteLine($"[INFO] Patched relic selection context for TUI prompts ({patched} methods)");
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"[WARN] Relic selection context patch: {ex.Message}"); }
+
             // Crystal Sphere normally opens a Godot-only tile screen. Replace that screen wait
             // with a headless task; the TUI drives SetTool/CellClicked on the captured minigame.
             PatchMethod(harmony, typeof(CrystalSphereMinigame), "PlayMinigame",
@@ -5128,34 +5335,62 @@ public class RunSimulator
 
     internal static class LocPatches
     {
+        public static void RelicObtainPrefix(object[] __args)
+        {
+            var sim = _bundleSimRef;
+            var relic = __args.OfType<RelicModel>().FirstOrDefault();
+            if (sim == null || relic == null) return;
+            sim.SetPendingSelectionContextFromRelic(relic);
+        }
+
         public static void CardSelectFromHandPrefix(
             CardSelectorPrefs prefs, AbstractModel source)
         {
             var sim = _bundleSimRef;
             if (sim == null) return;
 
-            var isDiscard = false;
-            var isUpgrade = false;
+            string? selectionKind = null;
             try
             {
                 var prompt = prefs.Prompt;
                 var discardPrompt = CardSelectorPrefs.DiscardSelectionPrompt;
-                isDiscard = prompt != null && discardPrompt != null &&
+                var isDiscard = prompt != null && discardPrompt != null &&
                     string.Equals(prompt.LocTable, discardPrompt.LocTable, StringComparison.Ordinal) &&
                     string.Equals(prompt.LocEntryKey, discardPrompt.LocEntryKey, StringComparison.Ordinal);
                 isDiscard |= prompt?.LocEntryKey?.Contains(
                     "discard", StringComparison.OrdinalIgnoreCase) == true;
-                isUpgrade = prompt?.LocEntryKey?.Contains(
-                    "upgrade", StringComparison.OrdinalIgnoreCase) == true;
+                var promptKey = prompt?.LocEntryKey ?? "";
+                selectionKind = isDiscard ? "discard" : promptKey.ToUpperInvariant() switch
+                {
+                    var key when key.Contains("UPGRADE") => "upgrade",
+                    var key when key.Contains("REMOVE") => "remove",
+                    var key when key.Contains("TRANSFORM") => "transform",
+                    var key when key.Contains("ENCHANT") => "enchant",
+                    var key when key.Contains("EXHAUST") => "exhaust",
+                    _ => null,
+                };
+
+                // Event choices already provide a richer description (including target card
+                // type, enchantment, transform result, etc.), so keep it when present.
+                if (prompt != null && string.IsNullOrEmpty(sim._pendingSelectionTitle))
+                {
+                    var localizedPrompt = _loc.Bilingual(prompt.LocTable, prompt.LocEntryKey);
+                    if (localizedPrompt != prompt.LocEntryKey)
+                    {
+                        sim._pendingSelectionTitle = localizedPrompt;
+                        sim._pendingSelectionTitleVars = LocVariables(prompt);
+                    }
+                }
             }
             catch { }
 
             var sourceEntry = source?.Id.Entry;
             if (sourceEntry is "GAMBLERS_BREW" or "GAMBLING_CHIP")
-                isDiscard = true;
+                selectionKind = "discard";
             if (sourceEntry == "ARMAMENTS")
-                isUpgrade = true;
-            sim._pendingSelectionKind = isDiscard ? "discard" : isUpgrade ? "upgrade" : null;
+                selectionKind = "upgrade";
+            if (selectionKind != null)
+                sim._pendingSelectionKind = selectionKind;
         }
 
         public static bool CrystalSpherePlayPrefix(

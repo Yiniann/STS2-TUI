@@ -36,6 +36,17 @@ class TestEventDescriptions:
             d = opt.get("description") or ""
             assert "IsMultiplayer" not in d
 
+    @pytest.mark.parametrize(
+        ("event_id", "variable"),
+        [("ENDLESS_CONVEYOR", "Gold"), ("TRIAL", "EntrantNumber")],
+    )
+    def test_event_narrative_exposes_localization_vars(self, game, event_id, variable):
+        state = game.start(seed=f"event-description-{event_id.lower()}")
+        game.skip_neow(state)
+        state = game.enter_room("event", event=event_id)
+
+        assert variable in state["description_vars"]
+
     def test_future_of_potions_exposes_option_localization_vars(self, game):
         state = game.start(seed="future-potions-vars")
         game.skip_neow(state)
@@ -46,6 +57,26 @@ class TestEventDescriptions:
         assert not option["description_vars"]["Potion"].endswith(".title")
         assert not option["description_vars"]["Rarity"].startswith("CARD_RARITY.")
         assert not option["description_vars"]["Type"].startswith("CARD_TYPE.")
+
+    def test_slippery_bridge_localizes_upgraded_card_name_variable(self, game):
+        state = game.start(seed="slippery-bridge-card-name")
+        game.skip_neow(state)
+        game.set_player(deck=["HEADBUTT"])
+
+        state = game.enter_room("rest_site")
+        smith = next(
+            option for option in state["options"]
+            if option["option_id"] == "SMITH" and option["is_enabled"]
+        )
+        state = game.act("choose_option", option_index=smith["index"])
+        state = game.act("select_cards", indices=str(state["cards"][0]["index"]))
+        state = game.enter_room("event", event="SLIPPERY_BRIDGE")
+
+        overcome = next(
+            option for option in state["options"]
+            if option["text_key"].endswith(".OVERCOME")
+        )
+        assert overcome["description_vars"]["RandomCard"] == "Headbutt+"
 
 
 class TestTrial:
@@ -144,6 +175,34 @@ class TestDenseVegetation:
         assert state["decision"] == "combat_play"
 
 
+class TestAmalgamator:
+    @pytest.mark.parametrize(("option_key", "base_card", "ultimate_card"), [
+        ("COMBINE_STRIKES", "CARD.STRIKE_IRONCLAD", "CARD.ULTIMATE_STRIKE"),
+        ("COMBINE_DEFENDS", "CARD.DEFEND_IRONCLAD", "CARD.ULTIMATE_DEFEND"),
+    ])
+    def test_combining_cards_finishes_event(
+        self, game, option_key, base_card, ultimate_card,
+    ):
+        game.start(seed=f"amalgamator-{option_key.lower()}")
+        state = game.enter_room("event", event="AMALGAMATOR")
+        before_ids = [card["id"] for card in state["player"]["deck"]]
+        option = next(
+            item for item in state["options"]
+            if item["text_key"].endswith(f".{option_key}")
+        )
+
+        state = game.act("choose_option", option_index=option["index"])
+        assert state["decision"] == "card_select"
+        assert state["min_select"] == state["max_select"] == 2
+
+        state = game.act("select_cards", indices="0,1")
+        after_ids = [card["id"] for card in state["player"]["deck"]]
+
+        assert state["decision"] == "map_select"
+        assert after_ids.count(base_card) == before_ids.count(base_card) - 2
+        assert after_ids.count(ultimate_card) == before_ids.count(ultimate_card) + 1
+
+
 class TestPotionCourier:
     def test_ransack_full_potion_slots_can_replace(self, game):
         game.start(seed="potion-courier-full")
@@ -184,3 +243,24 @@ class TestPotionCourier:
         assert [potion["id"] for potion in state["player"]["potions"]] == [
             f"POTION.{potion_id}" for potion_id in original_ids
         ]
+
+
+@pytest.mark.parametrize(("seed", "option_key", "kind", "title_parts", "expected_vars"), [
+    ("run_3", "PRECARIOUS_SHEARS", "remove", ("移除", "失去"), {"Cards": 2, "Damage": 16}),
+    ("cli_7064", "NEW_LEAF", "transform", ("变化",), {"Cards": 1}),
+])
+def test_neow_relic_card_selection_uses_relic_context(
+        game, seed, option_key, kind, title_parts, expected_vars):
+    state = game.start(seed=seed, lang="zh")
+    option = next(
+        option for option in state["options"]
+        if option["text_key"].endswith("." + option_key)
+    )
+
+    state = game.act("choose_option", option_index=option["index"])
+
+    assert state["decision"] == "card_select"
+    assert state["selection_kind"] == kind
+    assert all(part in state["selection_title"] for part in title_parts)
+    for name, value in expected_vars.items():
+        assert state["selection_title_vars"][name] == value

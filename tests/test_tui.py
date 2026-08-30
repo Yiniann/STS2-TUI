@@ -44,6 +44,16 @@ def test_inline_rows_wraps_complete_power_labels():
     assert rows[0][1][2] == len("Strength 2") + 2
 
 
+def test_not_enough_gold_errors_are_localized():
+    translate = lambda en, zh: zh
+
+    assert tui._error_message("Not enough gold", translate) == "金币不足"
+    assert tui._error_message(
+        "Not enough gold for Crystal Sphere divination", translate,
+    ) == "金币不足，无法进行水晶球占卜"
+    assert tui._error_message("Unknown error", translate) == "Unknown error"
+
+
 def test_upgrade_selection_title_says_upgrade_one_card():
     class Screen:
         def __init__(self):
@@ -85,7 +95,29 @@ def test_upgrade_selection_title_says_upgrade_one_card():
         tui.curses.color_pair = original_color_pair
 
     rendered = "\n".join(call[2] for call in app.screen.calls)
-    assert "升级一张牌" in rendered
+    assert "选择一张牌升级" in rendered
+
+
+def test_selection_title_uses_context_and_resolves_variables():
+    title = tui._card_selection_title({
+        "selection_title": "选择{Amount}张牌附魔：{Enchantment}。",
+        "selection_title_vars": {"Amount": 1, "Enchantment": "锋利 3"},
+        "selection_kind": "enchant",
+        "min_select": 1,
+        "max_select": 1,
+    }, lambda en, zh: zh, lang="zh")
+
+    assert title == "选择1张牌附魔：锋利 3。"
+
+
+def test_selection_title_falls_back_to_transform_context():
+    title = tui._card_selection_title({
+        "selection_kind": "transform",
+        "min_select": 1,
+        "max_select": 1,
+    }, lambda en, zh: zh, lang="zh")
+
+    assert title == "选择一张牌变化"
 
 
 def test_crystal_sphere_card_tokens_include_rarity():
@@ -366,6 +398,290 @@ def test_killing_card_thief_shows_returned_card_before_combat_rewards():
     assert app.acquired_cards == [stolen]
     assert app.pending_reward is True
     assert app.pending_reward_cards == []
+
+
+def test_enemy_status_added_after_playing_card_opens_modal():
+    strike = {
+        "id": "CARD.STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "upgraded": False,
+    }
+    dazed = {
+        "id": "CARD.DAZED",
+        "name": "Dazed",
+        "type": "Status",
+        "upgraded": False,
+    }
+    old_state = {
+        "decision": "combat_play",
+        "player": {"deck": [strike], "gold": 0, "relics": [], "potions": []},
+        "hand": [strike],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "play_pile": [],
+        "enemies": [{"index": 0, "powers": [{"name": "Human Hive"}]}],
+    }
+    new_state = {
+        "decision": "combat_play",
+        "player": {"deck": [strike], "gold": 0, "relics": [], "potions": []},
+        "hand": [],
+        "draw_pile": [dazed],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "play_pile": [strike],
+        "enemies": [{"index": 0, "powers": [{"name": "Human Hive"}]}],
+    }
+
+    app = tui.Tui.__new__(tui.Tui)
+    app.state = old_state
+    app.send = lambda _cmd: new_state
+    app.lang = "zh"
+    app.t = lambda en, zh: zh
+    app.cursor = 0
+    app.combat_focus = "hand"
+    app.enemy_cursor = 0
+    app.enemy_power_cursor = 0
+    app.target_cursor = None
+    app.pending = None
+    app.selected = set()
+    app.overlay = None
+    app.overlay_cursor = 0
+    app.message = ""
+    app.pending_reward = False
+    app.pending_reward_gold = 0
+    app.pending_reward_relics = []
+    app.pending_reward_potions = []
+    app.pending_reward_cards = []
+    app.pending_reward_title = ""
+
+    app._act("play_card", {"card_index": 0, "target_index": 0})
+
+    assert app.overlay == "acquired"
+    assert app.acquired_title == "敌人加入卡牌"
+    assert app.acquired_cards == [{**dazed, "_pile": "draw_pile"}]
+
+
+def test_combat_card_detection_covers_every_pile_and_hostile_type():
+    zones = ("hand", "draw_pile", "discard_pile", "exhaust_pile", "play_pile")
+    old_state = {zone: [] for zone in zones}
+    new_state = {zone: [] for zone in zones}
+    expected = []
+    for index, zone in enumerate(zones):
+        card = {
+            "id": f"CARD.TEST_{index}",
+            "name": f"Test {index}",
+            "type": "Status" if index % 2 == 0 else "Curse",
+            "upgraded": False,
+        }
+        new_state[zone].append(card)
+        expected.append({**card, "_pile": zone})
+
+    added = tui._added_combat_cards(old_state, new_state)
+
+    assert added == expected
+    assert all(card["type"] in ("Status", "Curse") for card in added)
+
+
+def test_entering_combat_reports_only_status_beyond_existing_deck():
+    dazed = {
+        "id": "CARD.DAZED",
+        "name": "Dazed",
+        "type": "Status",
+        "upgraded": False,
+    }
+    wound = {
+        "id": "CARD.WOUND",
+        "name": "Wound",
+        "type": "Status",
+        "upgraded": False,
+    }
+    old_state = {
+        "decision": "map_select",
+        "player": {"deck": [dazed], "gold": 0, "relics": [], "potions": []},
+        "choices": [],
+    }
+    new_state = {
+        "decision": "combat_play",
+        "player": {"deck": [dazed], "gold": 0, "relics": [], "potions": []},
+        "hand": [dazed],
+        "draw_pile": [wound],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "play_pile": [],
+        "enemies": [{"index": 0, "powers": []}],
+    }
+
+    app = tui.Tui.__new__(tui.Tui)
+    app.state = old_state
+    app.send = lambda _cmd: new_state
+    app.lang = "zh"
+    app.t = lambda en, zh: zh
+    app.cursor = 0
+    app.combat_focus = "hand"
+    app.enemy_cursor = 0
+    app.enemy_power_cursor = 0
+    app.target_cursor = None
+    app.pending = None
+    app.selected = set()
+    app.overlay = None
+    app.overlay_cursor = 0
+    app.message = ""
+    app.pending_reward = False
+    app.pending_reward_gold = 0
+    app.pending_reward_relics = []
+    app.pending_reward_potions = []
+    app.pending_reward_cards = []
+    app.pending_reward_title = ""
+    app._combat_snapshot = None
+
+    app._act("select_map_node", {"col": 0, "row": 0})
+
+    assert app.overlay == "acquired"
+    assert app.acquired_title == "敌人加入卡牌"
+    assert app.acquired_cards == [{**wound, "_pile": "draw_pile"}]
+    assert app._combat_snapshot is new_state
+
+
+def test_status_added_during_combat_card_selection_uses_last_combat_snapshot():
+    strike = {
+        "id": "CARD.STRIKE_IRONCLAD",
+        "name": "Strike",
+        "type": "Attack",
+        "upgraded": False,
+    }
+    wound = {
+        "id": "CARD.WOUND",
+        "name": "Wound",
+        "type": "Status",
+        "upgraded": False,
+    }
+    combat_snapshot = {
+        "decision": "combat_play",
+        "player": {"deck": [strike], "gold": 0, "relics": [], "potions": []},
+        "hand": [strike],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "play_pile": [],
+        "enemies": [{"index": 0, "powers": []}],
+    }
+    old_state = {
+        "decision": "card_select",
+        "player": {"deck": [strike], "gold": 0, "relics": [], "potions": []},
+        "cards": [strike],
+        "min_select": 1,
+        "max_select": 1,
+    }
+    new_state = {
+        "decision": "combat_play",
+        "player": {"deck": [strike], "gold": 0, "relics": [], "potions": []},
+        "hand": [],
+        "draw_pile": [],
+        "discard_pile": [wound],
+        "exhaust_pile": [],
+        "play_pile": [strike],
+        "enemies": [{"index": 0, "powers": []}],
+    }
+
+    app = tui.Tui.__new__(tui.Tui)
+    app.state = old_state
+    app.send = lambda _cmd: new_state
+    app.lang = "zh"
+    app.t = lambda en, zh: zh
+    app.cursor = 0
+    app.combat_focus = "hand"
+    app.enemy_cursor = 0
+    app.enemy_power_cursor = 0
+    app.target_cursor = None
+    app.pending = None
+    app.selected = set()
+    app.overlay = None
+    app.overlay_cursor = 0
+    app.message = ""
+    app.pending_reward = False
+    app.pending_reward_gold = 0
+    app.pending_reward_relics = []
+    app.pending_reward_potions = []
+    app.pending_reward_cards = []
+    app.pending_reward_title = ""
+    app._combat_snapshot = combat_snapshot
+
+    app._act("select_cards", {"indices": "0"})
+
+    assert app.overlay == "acquired"
+    assert app.acquired_title == "敌人加入卡牌"
+    assert app.acquired_cards == [{**wound, "_pile": "discard_pile"}]
+
+
+def test_returned_and_enemy_added_cards_share_one_modal():
+    stolen = {
+        "id": "CARD.BLUDGEON",
+        "name": "Bludgeon",
+        "type": "Attack",
+        "upgraded": False,
+    }
+    dazed = {
+        "id": "CARD.DAZED",
+        "name": "Dazed",
+        "type": "Status",
+        "upgraded": False,
+    }
+    old_state = {
+        "decision": "combat_play",
+        "player": {"deck": [stolen], "gold": 0, "relics": [], "potions": []},
+        "hand": [],
+        "draw_pile": [],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "play_pile": [],
+        "enemies": [{
+            "index": 0,
+            "powers": [{"name": "Grabbed", "stolen_card": stolen}],
+        }],
+    }
+    new_state = {
+        "decision": "combat_play",
+        "player": {"deck": [stolen], "gold": 0, "relics": [], "potions": []},
+        "hand": [stolen],
+        "draw_pile": [dazed],
+        "discard_pile": [],
+        "exhaust_pile": [],
+        "play_pile": [],
+        "enemies": [{"index": 0, "powers": []}],
+    }
+
+    app = tui.Tui.__new__(tui.Tui)
+    app.state = old_state
+    app.send = lambda _cmd: new_state
+    app.lang = "zh"
+    app.t = lambda en, zh: zh
+    app.cursor = 0
+    app.combat_focus = "hand"
+    app.enemy_cursor = 0
+    app.enemy_power_cursor = 0
+    app.target_cursor = None
+    app.pending = None
+    app.selected = set()
+    app.overlay = None
+    app.overlay_cursor = 0
+    app.message = ""
+    app.pending_reward = False
+    app.pending_reward_gold = 0
+    app.pending_reward_relics = []
+    app.pending_reward_potions = []
+    app.pending_reward_cards = []
+    app.pending_reward_title = ""
+
+    app._act("play_card", {"card_index": 0, "target_index": 0})
+
+    assert app.overlay == "acquired"
+    assert app.acquired_title == "卡牌已归还 / 敌人加入卡牌"
+    assert app.acquired_cards == [
+        {**stolen, "_pile": "hand"},
+        {**dazed, "_pile": "draw_pile"},
+    ]
 
 
 def test_grabbed_card_returned_to_hand_is_detected():

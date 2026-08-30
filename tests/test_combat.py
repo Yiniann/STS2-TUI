@@ -227,6 +227,19 @@ class TestCombatEnd:
                 assert "amount" in pw
                 assert "description" in pw
 
+    def test_card_backed_temporary_power_is_localized(self, game):
+        state = game.start(character="Defect", seed="card-backed-power-loc")
+        game.skip_neow(state)
+        game.set_player(deck=["HOTFIX"])
+        state = game.enter_room("combat", encounter="SHRINKER_BEETLE_WEAK")
+
+        hotfix = next(card for card in state["hand"] if card["id"].endswith("HOTFIX"))
+        state = game.act("play_card", card_index=hotfix["index"])
+        power = next(power for power in state["player_powers"] if power["name"] == "Hotfix")
+
+        assert power["name"] != "HOTFIX_POWER.title"
+        assert power["description"] != "HOTFIX_POWER.description"
+
 
 class TestCombatEdgeCases:
     def test_exhaust_all_and_end_turn(self, game):
