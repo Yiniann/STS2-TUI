@@ -134,14 +134,18 @@ def _copy_dlls(game_dir):
         shutil.copy2(sts2, backup)
 
 
-def _patch_dll():
-    """Apply IL patches to sts2.dll using setup.sh (requires Mono.Cecil via dotnet)."""
+def _run_posix_setup(game_dir=None):
+    """Run the native macOS/Linux first-time setup."""
     setup_sh = os.path.join(ROOT, "setup.sh")
     if not os.path.isfile(setup_sh):
-        print("  ⚠ setup.sh not found, skipping IL patch")
-        return
-    # Run just the patching part via setup.sh
-    subprocess.run(["bash", setup_sh], cwd=ROOT)
+        return False
+    command = ["bash", setup_sh]
+    if game_dir:
+        command.append(game_dir)
+    try:
+        return subprocess.run(command, cwd=ROOT).returncode == 0
+    except FileNotFoundError:
+        return False
 
 
 def _run_windows_setup(game_dir=None):
@@ -238,7 +242,9 @@ def ensure_setup():
                 print("   Or run: ./setup.sh /path/to/game/data")
                 sys.exit(1)
             print(f"  Found game at: {game_dir}")
-            _copy_dlls(game_dir)
+            if not _run_posix_setup(game_dir):
+                print("❌ Setup failed. Run setup.sh to see the full error.")
+                sys.exit(1)
         if not os.path.isfile(sts2_dll):
             print("❌ Failed to copy sts2.dll")
             sys.exit(1)

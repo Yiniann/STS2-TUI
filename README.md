@@ -10,7 +10,7 @@
 - 展示卡牌稀有度、升级预览、遗物和药水效果
 - 支持事件、商店、篝火、占卜及多阶段 Boss
 - 自动保存当前进度，死亡或主动放弃后删除活动存档
-- Windows Release 不需要安装 Python
+- Windows 和 macOS Release 不需要安装 Python
 
 ## Windows 下载
 
@@ -25,6 +25,24 @@
 
 ```powershell
 .\setup.ps1 -GameDir "D:\SteamLibrary\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64"
+```
+
+## macOS 下载
+
+1. Apple Silicon Mac 下载 `STS2-TUI-macOS-arm64.zip`，Intel Mac 下载 `STS2-TUI-macOS-x64.zip`。
+2. 完整解压，并确保已通过 Steam 安装《杀戮尖塔 2》和 [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)。
+3. 双击 `STS2-TUI.command`，或在终端中运行 `./STS2-TUI`。
+
+首次启动会从本机的 Steam 游戏目录复制所需 DLL、打补丁并构建后端。如果 macOS 阻止打开下载的未公证程序，可在系统设置的“隐私与安全性”中选择“仍要打开”，或对解压目录执行：
+
+```bash
+xattr -dr com.apple.quarantine STS2-TUI-macOS-arm64
+```
+
+如果 Steam 安装在无法自动识别的位置：
+
+```bash
+./setup.sh "/path/to/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64"
 ```
 
 ## 操作
@@ -60,13 +78,13 @@ Windows：
 py -3 python\play.py
 ```
 
-## 制作 Windows Release
+## 制作 Release
 
-仓库内的 GitHub Actions 工作流会在 Windows Runner 上用 PyInstaller 生成免 Python 的发行包。
+仓库内的 GitHub Actions 工作流会用 PyInstaller 生成 Windows x64、macOS arm64 和 macOS x64 的免 Python 发行包。
 
 手动构建测试包：进入仓库的 **Actions → Build Windows release → Run workflow**，完成后在该次运行的 Artifacts 中下载 ZIP。
 
-正式发版：创建并推送 `v*` 标签，工作流会自动创建 GitHub Release 并上传 Windows ZIP。
+正式发版：创建并推送 `v*` 标签，工作流会自动创建 GitHub Release 并上传各平台 ZIP。
 
 ```bash
 git tag v0.1.0
@@ -93,9 +111,11 @@ git push origin v0.1.0
 
 STS2-TUI is a full-screen terminal interface for Slay the Spire 2. It provides keyboard-driven combat, targeting, map navigation, events, shops, rewards, and save management.
 
-### Windows
+### Windows and macOS
 
 Download `STS2-TUI-Windows-x64.zip` from **Releases**, extract it, then double-click `STS2-TUI.exe` or `STS2-TUI.cmd`. Python is bundled and does not need to be installed. The first launch requires the Steam game installation and the [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) to prepare the local headless backend.
+
+On macOS, download `STS2-TUI-macOS-arm64.zip` for Apple Silicon or `STS2-TUI-macOS-x64.zip` for Intel, extract it, then open `STS2-TUI.command`. Python is bundled; the Steam game installation and .NET 9 SDK are still required for first-time setup.
 
 The release never includes game DLLs. They are copied from the user's own Steam installation during first-time setup.
 
